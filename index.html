@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Smart POS Pro</title>
+
+<script src="https://unpkg.com/html5-qrcode"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+<style>
+body{margin:0;font-family:system-ui;background:#0f172a;color:#e2e8f0}
+header{padding:14px;background:#111827;display:flex;justify-content:space-between;align-items:center;font-weight:600}
+#scanner{height:240px;background:black;position:relative}
+#flash{position:absolute;inset:0;background:rgba(0,255,0,.35);display:none}
+.cart{background:#111827;margin-top:-15px;padding:15px;border-radius:20px 20px 0 0;min-height:55vh}
+.item{background:#1f2937;padding:10px;margin:8px 0;border-radius:12px;display:flex;justify-content:space-between}
+button{padding:8px 12px;border:none;border-radius:10px;background:#2563eb;color:white}
+.remove{background:#ef4444}
+.checkoutBar{position:fixed;bottom:0;width:100%;background:#111827;padding:12px;display:flex;justify-content:space-between}
+#receipt{display:none;padding:20px;background:white;color:black;min-height:100vh}
+.receiptBox{max-width:320px;margin:auto;font-family:monospace}
+</style>
+</head>
+
+<body>
+
+<header>
+Smart POS Pro
+<button onclick="resetCart()">Reset</button>
+</header>
+
+<div id="scanner"><div id="flash"></div></div>
+
+<div id="mainScreen">
+  <div class="cart" id="cartItems"></div>
+  <div class="checkoutBar">
+    <span id="total">₹0</span>
+    <button onclick="openReceipt()">Checkout</button>
+  </div>
+</div>
+
+<div id="receipt">
+  <div class="receiptBox" id="receiptBox"></div>
+  <div id="payment"></div>
+  <button onclick="downloadPDF()">Download PDF</button>
+  <button onclick="back()">Back</button>
+</div>
+
+<script>
+let cart = JSON.parse(localStorage.getItem('cart') || '[]');
+let products = JSON.parse(localStorage.getItem('products') || '{}');
+let lastReceipt = [];
+
+let scanner, lastScan = 0;
+
+const beep = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
+
+function flashGreen(){
+  flash.style.display='block';
+  setTimeout(()=>flash.style.display='none',150);
+}
+
+window.onload = () => {
+  render();
+  startScanner();
+};
+
+async function startScanner(){
+  scanner = new Html5Qrcode('scanner');
+
+  await scanner.start(
+    { facingMode: "environment" }, // ✅ FIXED
+    { fps: 15, qrbox: 220 },
+    onScan
+  );
+}
+
+function onScan(decodedText, decodedResult){
+
+  if (Date.now() - lastScan < 800) return;
+  lastScan = Date.now();
+
+  let code = "";
+
+  if (typeof decodedText === "string" && decodedText.trim() !== "") {
+    code = decodedText.trim();
+  } else if (decodedResult?.decodedText) {
+    code = decodedResult.decodedText.trim();
+  }
+
+  if (!code) return;
+
+  console.log("SCAN:", code);
+
+  beep.play();
+  flashGreen();
+
+  // ✅ IF PRODUCT EXISTS → ADD
+  if (products.hasOwnProperty(code)) {
+    addToCart(products[code]);
+    return;
+  }
+
+  // ❗ FIRST TIME SCAN → ADD PRODUCT
+  let name = prompt("Enter product name:");
+  if (!name) return;
+
+  let priceInput = prompt("Enter price (GST incl):");
+  let price = Number(priceInput);
+
+  if (isNaN(price) || price <= 0) {
+    alert("Invalid price");
+    return;
+  }
+
+  products[code] = {
+    code: code,
+    name: name,
+    price: price
+  };
+
+  save();
+
+  addToCart(products[code]);
+}
+
+function addToCart(p){
+  let item = cart.find(x => x.code === p.code);
+
+  if(item){
+    item.qty++;
+  } else {
+    cart.push({...p, qty:1});
+  }
+
+  save();
+  render();
+}
+
+function changeQty(code, delta){
+  let item = cart.find(x => x.code === code);
+  if(!item) return;
+
+  item.qty += delta;
+
+  if(item.qty <= 0){
+    cart = cart.filter(x => x.code !== code);
+  }
+
+  save();
+  render();
+}
+
+function removeItem(code){
+  cart = cart.filter(x => x.code !== code);
+  save();
+  render();
+}
+
+function render(){
+  let html = '';
+  let totalPrice = 0;
+
+  cart.forEach(i => {
+    totalPrice += i.price * i.qty;
+
+    html += `
+      <div class="item">
+        <div>
+          <b>${i.name}</b><br>₹${i.price}
+        </div>
+        <div>
+          <button onclick="changeQty('${i.code}',-1)">-</button>
+          ${i.qty}
+          <button onclick="changeQty('${i.code}',1)">+</button>
+          <button class="remove" onclick="removeItem('${i.code}')">✕</button>
+        </div>
+      </div>
+    `;
+  });
+
+  cartItems.innerHTML = html;
+  total.innerText = '₹' + totalPrice.toFixed(2);
+}
+
+function save(){
+  localStorage.setItem('cart', JSON.stringify(cart));
+  localStorage.setItem('products', JSON.stringify(products));
+}
+
+function resetCart(){
+  cart = [];
+  save();
+  render();
+}
+
+function calcGST(total){
+  const rate = 0.18;
+  const gst = total - total/(1+rate);
+  return { cgst: gst/2, sgst: gst/2 };
+}
+
+function openReceipt(){
+  let total = 0;
+  let html = '';
+
+  lastReceipt = [...cart];
+
+  cart.forEach(i => {
+    let line = i.price * i.qty;
+    total += line;
+    html += `${i.name} x ${i.qty} = ₹${line}<br>`;
+  });
+
+  const g = calcGST(total);
+
+  mainScreen.style.display='none';
+  receipt.style.display='block';
+
+  receiptBox.innerHTML = `
+    <h2>GST Invoice</h2>
+    <hr>
+    ${html}
+    <hr>
+    CGST: ₹${g.cgst.toFixed(2)}<br>
+    SGST: ₹${g.sgst.toFixed(2)}
+    <hr>
+    <b>Total: ₹${total.toFixed(2)}</b>
+    <hr>
+    <button onclick="payCash()">Cash</button>
+    <button onclick="payUPI(${total.toFixed(2)})">UPI</button>
+  `;
+}
+
+function payCash(){
+  payment.innerHTML = `<p>Cash received</p><button onclick="paymentDone()">Done</button>`;
+}
+
+function payUPI(t){
+  payment.innerHTML = `<div id="qrcode"></div><button onclick="paymentDone()">Done</button>`;
+  new QRCode(qrcode,{
+    text:`upi://pay?amount=${t}`,
+    width:180,
+    height:180
+  });
+}
+
+function paymentDone(){
+  alert("Payment successful");
+
+  cart = [];
+  save();
+
+  back();
+  render();
+}
+
+function back(){
+  mainScreen.style.display='block';
+  receipt.style.display='none';
+  payment.innerHTML='';
+}
+
+function downloadPDF(){
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+
+  let y = 10;
+
+  doc.text('GST Invoice', 10, y);
+  y += 10;
+
+  lastReceipt.forEach(i => {
+    doc.text(`${i.name} x ${i.qty} = ₹${i.price*i.qty}`, 10, y);
+    y += 8;
+  });
+
+  let total = lastReceipt.reduce((s,i)=>s+i.price*i.qty,0);
+  const g = calcGST(total);
+
+  y += 5;
+  doc.text(`CGST: ₹${g.cgst.toFixed(2)}`, 10, y);
+  y += 8;
+  doc.text(`SGST: ₹${g.sgst.toFixed(2)}`, 10, y);
+  y += 8;
+  doc.text(`Total: ₹${total.toFixed(2)}`, 10, y);
+
+  doc.save('invoice.pdf');
+}
+</script>
+
+</body>
+</html>
